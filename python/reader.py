@@ -1,164 +1,149 @@
 # ==============================================================================
 # reader.py
-# Scopo: ricevere i dati CSV dalla board (o dal simulatore) e renderli
-# utilizzabili dal resto del sistema (dashboard, log, analisi...).
+# Scopo: ricevere i dati CSV dalla board o dal simulatore e renderli
+# utilizzabili dal resto del sistema.
 #
-# Supporta due sorgenti intercambiabili:
-#   --port COM3      → porta seriale reale (board collegata via USB)
-#   --stdin          → stdin (output del simulatore via pipe)
+# Formato CSV atteso: timestamp,temperatura,acc_x,acc_y,acc_z
+# Esempio:            58182,39.84,0.023,-0.085,1.007
 #
 # Uso:
-#   python simulator.py | python -u reader.py --stdin     (simulatore)
 #   python reader.py --port COM3                          (board reale)
+#   python simulator.py | python -u reader.py --stdin     (simulatore)
 # ==============================================================================
 
 import sys
 import argparse
-# ↑ argparse: modulo standard per gestire gli argomenti da riga di comando.
-#   Permette di scrivere: python reader.py --port COM3 --baudrate 115200
-#   e di accedere ai valori comodamente nel codice.
-
 from dataclasses import dataclass
-# ↑ dataclass: un decoratore che genera automaticamente metodi comuni
-#   (__init__, __repr__, ecc.) per una classe che contiene solo dati.
-#   È simile a una struct in C++: raggruppa dati correlati con un nome.
+# ↑ Ricorda: dataclass genera automaticamente __init__ e altri metodi
+#   per una classe che contiene solo dati — come una struct in C++.
 
 
 # --- STRUTTURA DATI -----------------------------------------------------------
-# @dataclass è un "decoratore": una funzione che modifica il comportamento
-# della classe che segue. Il @ è la sintassi dei decoratori in Python.
-#
-# Senza @dataclass dovresti scrivere manualmente:
-#   def __init__(self, temperature, vibration, load):
-#       self.temperature = temperature
-#       self.vibration = vibration
-#       self.load = load
-# @dataclass lo genera automaticamente per te.
 
 @dataclass
 class Sample:
     """
-    Rappresenta un singolo campione di telemetria.
-    Usare una classe con nomi espliciti invece di una tupla (22.4, 0.53, 67.2)
-    rende il codice molto più leggibile: scrivi sample.temperature invece di sample[0].
+    Rappresenta un singolo campione di telemetria ricevuto dalla board.
+
+    Ogni campo corrisponde a un valore nel CSV:
+        timestamp,temperatura,acc_x,acc_y,acc_z
+        58182,    39.84,      0.023,-0.085,1.007
+
+    Usare una dataclass invece di una tupla (58182, 39.84, 0.023, ...)
+    rende il codice molto più leggibile: sample.acc_z invece di sample[4].
     """
-    temperature: float  # °C  — type annotation del campo
-    vibration:   float  # 0.0 – 1.0
-    load:        float  # %
+    timestamp:   int    # millisecondi dall'accensione della board (millis())
+                        # int perché millis() restituisce un intero, non un float
+    temperature: float  # °C — temperatura interna del chip IMU (non ambientale)
+    acc_x:       float  # accelerazione asse X in unità g (g = 9.81 m/s²)
+    acc_y:       float  # accelerazione asse Y in unità g
+    acc_z:       float  # accelerazione asse Z in unità g
+                        # a board ferma e piatta: x≈0, y≈0, z≈1.0 (gravità)
 
 
 # --- PARSING ------------------------------------------------------------------
 
 def parse_line(line: str) -> Sample | None:
-    # ↑ "Sample | None" significa: la funzione restituisce un Sample oppure None.
-    #   None in Python è l'equivalente di nullptr/null: assenza di valore.
-    #   Questo tipo si chiama "Optional" ed è molto comune in Python moderno.
     """
     Converte una riga di testo CSV in un oggetto Sample.
-    Restituisce None se la riga non è un dato valido (commento, riga vuota, errore).
+    Restituisce None se la riga non è valida (commento, vuota, formato errato).
+
+    Questa funzione è separata dalla logica di lettura per un motivo preciso:
+    se domani cambiamo il protocollo (es. da CSV a JSON), modifichiamo solo
+    questa funzione — tutto il resto del codice rimane invariato.
     """
 
-    # str.strip() rimuove spazi e newline all'inizio e alla fine della stringa.
-    # Serve perché readline() dalla seriale include spesso '\n' o '\r\n' alla fine.
+    # strip() rimuove spazi e newline all'inizio e alla fine.
+    # Necessario perché readline() dalla seriale include '\n' o '\r\n'.
     line = line.strip()
 
-    # Righe vuote o commenti (iniziano con #) vengono ignorati.
+    # Righe vuote e commenti (iniziano con #) vengono ignorati.
     # "not line" è True se la stringa è vuota — in Python le stringhe vuote
-    # sono "falsy" (si comportano come False in un contesto booleano).
+    # sono "falsy": si comportano come False in un contesto booleano.
     if not line or line.startswith("#"):
         return None
 
-    # str.split(",") divide la stringa su ogni virgola e restituisce una LISTA.
-    # Esempio: "22.40,0.53,67.20".split(",") → ["22.40", "0.53", "67.20"]
-    # Una lista in Python è come un array dinamico: [elem0, elem1, elem2]
-    # Si accede agli elementi con l'indice: parts[0], parts[1], parts[2]
+    # split(",") divide la stringa su ogni virgola e restituisce una lista.
+    # "58182,39.84,0.023,-0.085,1.007".split(",")
+    # → ["58182", "39.84", "0.023", "-0.085", "1.007"]
     parts = line.split(",")
 
-    # Controlliamo di avere esattamente 3 campi. Se no, la riga è malformata.
-    if len(parts) != 3:
-        # len() restituisce la lunghezza di una sequenza (lista, stringa, tupla...)
+    # Controlliamo di avere esattamente 5 campi.
+    # Il firmware precedente ne mandava 3, ora ne manda 5.
+    # Se arriva ancora una riga vecchia a 3 campi, la ignoriamo.
+    if len(parts) != 5:
         return None
 
-    # try/except per gestire errori di conversione.
-    # float("abc") lancerebbe un ValueError — lo intercettiamo invece di crashare.
+    # try/except per gestire errori di conversione numerica.
+    # int("abc") o float("xyz") lancerebbero un ValueError.
+    # Lo intercettiamo e restituiamo None invece di far crashare il programma.
     try:
-        # Creiamo un'istanza di Sample con i tre valori convertiti in float.
-        # float("22.40") → 22.4
-        # Stiamo usando i "keyword arguments": passiamo i valori per nome,
-        # non per posizione. Rende il codice più chiaro e meno soggetto a errori.
         return Sample(
-            temperature=float(parts[0]),
-            vibration=float(parts[1]),
-            load=float(parts[2]),
+            timestamp=int(parts[0]),      # int() converte stringa in intero
+            temperature=float(parts[1]),  # float() converte stringa in decimale
+            acc_x=float(parts[2]),
+            acc_y=float(parts[3]),
+            acc_z=float(parts[4]),
         )
     except ValueError:
-        # La riga conteneva qualcosa che non è un numero — ignoriamo.
+        # La riga conteneva qualcosa che non è un numero — ignoriamo silenziosamente.
         return None
 
 
 # --- SORGENTI DATI ------------------------------------------------------------
-# Queste due funzioni sono GENERATORI — usano "yield" invece di "return".
+# Le due funzioni qui sotto sono GENERATORI — usano yield invece di return.
 #
-# Un generatore è una funzione che produce valori uno alla volta, su richiesta,
-# invece di calcolarne una lista intera e restituirla tutta.
+# Un generatore produce valori uno alla volta su richiesta, senza costruire
+# una lista intera in memoria. Per la lettura seriale (potenzialmente infinita)
+# è la scelta naturale: non puoi mai costruire una lista infinita, ma puoi
+# produrre un elemento alla volta per sempre.
 #
-# Esempio con return (lista): calcola tutti i valori, li mette in memoria, li restituisce.
-# Esempio con yield (generatore): produce un valore, si ferma, aspetta che
-#   qualcuno lo consumi, poi riprende dal punto in cui si era fermato.
-#
-# Per un loop infinito come la lettura seriale, il generatore è perfetto:
-# non potresti mai costruire una lista infinita, ma puoi produrre un elemento
-# alla volta per sempre.
-#
-# Come si usa: "for sample in read_from_stdin(): ..."
-# Ogni iterazione del for ottiene il prossimo valore yielded.
+# Entrambe le funzioni hanno la stessa "interfaccia" — producono oggetti Sample
+# uno alla volta. Il codice che le usa (main, dashboard) non sa né gli importa
+# quale delle due sta usando. Questo è il principio dei tre strati separati.
 
 def read_from_stdin():
     """
     Generatore: legge campioni da stdin.
-    Usato quando il simulatore viene collegato via pipe:
-        python simulator.py | python -u reader.py --stdin
+    Usato quando il simulatore è collegato via pipe:
+        python -u simulator.py | python -u reader.py --stdin
     """
-    print("Lettura da stdin (simulatore)...", file=sys.stderr)
-
-    # sys.stdin è l'input standard — in un pipe riceve quello che
-    # il processo precedente ha scritto su stdout.
-    # Iterare su sys.stdin con "for line in sys.stdin" legge una riga alla volta,
-    # bloccandosi ad aspettare se non ci sono righe disponibili.
+    print("Lettura da stdin...", file=sys.stderr)
+    # sys.stdin in un pipe riceve quello che il processo precedente
+    # ha scritto su stdout. "for line in sys.stdin" legge una riga
+    # alla volta, bloccandosi ad aspettare se non ci sono righe disponibili.
     for line in sys.stdin:
         sample = parse_line(line)
-
         # Yieldiamo solo se parse_line ha restituito un Sample valido (non None).
-        # "if sample" è True per qualsiasi oggetto non-None, non-vuoto.
+        # "if sample" è True per qualsiasi oggetto non-None.
         if sample:
             yield sample
-            # ↑ yield: restituisce sample al chiamante e SOSPENDE la funzione qui.
-            #   Al prossimo "next()" del for esterno, riprende dalla riga dopo yield.
+            # ↑ yield sospende la funzione qui e restituisce sample al chiamante.
+            #   Al prossimo giro del for esterno, riprende dalla riga dopo yield.
 
 
 def read_from_serial(port: str, baudrate: int = 115200):
-    # ↑ baudrate: int = 115200 → parametro con VALORE DEFAULT.
-    #   Se non lo passi, usa 115200. Equivale a un parametro opzionale in C++.
     """
-    Generatore: legge campioni dalla porta seriale reale.
+    Generatore: legge campioni dalla porta seriale reale (board collegata).
     Richiede: pip install pyserial
-    """
 
+    Args:
+        port:     nome porta, es. 'COM3' su Windows, '/dev/ttyUSB0' su Linux
+        baudrate: velocità di comunicazione — deve coincidere col firmware (115200)
+    """
     # Import locale: importiamo pyserial solo se questa funzione viene chiamata.
     # Se l'utente usa --stdin, non ha bisogno di pyserial installato.
-    # Questo pattern è utile per dipendenze opzionali.
     try:
         import serial
     except ImportError:
-        # ImportError viene lanciato se il modulo non è installato.
         print("Errore: pyserial non installato.", file=sys.stderr)
-        print("Esegui: pip install pyserial", file=sys.stderr)
-        sys.exit(1)  # 1 = uscita con errore
+        print("Esegui: py -3.12 -m pip install pyserial", file=sys.stderr)
+        sys.exit(1)
 
     print(f"Connessione a {port} @ {baudrate} baud...", file=sys.stderr)
 
-    # "with ... as ser:" è il context manager di Python.
-    # Garantisce che ser.close() venga chiamato automaticamente alla fine,
+    # "with serial.Serial(...) as ser:" è il context manager di Python.
+    # Garantisce che la porta seriale venga chiusa automaticamente alla fine,
     # anche se si verifica un'eccezione. Equivale a try/finally in C++.
     with serial.Serial(port, baudrate, timeout=1) as ser:
         print("Connesso. In ascolto...", file=sys.stderr)
@@ -172,62 +157,55 @@ def read_from_serial(port: str, baudrate: int = 115200):
                 if sample:
                     yield sample
             except serial.SerialException as e:
+                # SerialException viene lanciata se la board viene scollegata.
                 print(f"Errore seriale: {e}", file=sys.stderr)
-                break  # esce dal while, termina il generatore
+                break  # esce dal while, il generatore termina
+
 
 # --- FUNZIONE PRINCIPALE ------------------------------------------------------
 
 def main():
-    # Creiamo il parser degli argomenti da riga di comando.
+    # argparse gestisce gli argomenti da riga di comando.
+    # Permette di scrivere: python reader.py --port COM3
+    # e di accedere ai valori con args.port, args.stdin, args.baudrate.
     parser = argparse.ArgumentParser(description="Desk Telemetry Reader")
 
     # add_mutually_exclusive_group: solo uno dei due argomenti può essere usato.
-    # Impedisce di passare sia --port che --stdin contemporaneamente.
+    # required=True: almeno uno è obbligatorio.
     group = parser.add_mutually_exclusive_group(required=True)
-    # required=True → almeno uno dei due è obbligatorio.
+    group.add_argument("--port",  help="Porta seriale, es. COM3")
+    group.add_argument("--stdin", action="store_true",
+                       help="Leggi da stdin (simulatore via pipe)")
+    # action="store_true": --stdin non richiede un valore, è un flag on/off.
+    # Se presente → args.stdin == True. Se assente → args.stdin == False.
 
-    group.add_argument("--port",
-                       help="Porta seriale, es. COM3 o /dev/ttyUSB0")
+    parser.add_argument("--baudrate", type=int, default=115200,
+                        help="Baud rate (default: 115200)")
 
-    group.add_argument("--stdin",
-                       action="store_true",
-                       help="Leggi da stdin (output del simulatore)")
-    # action="store_true" → se --stdin è presente, args.stdin vale True.
-    # Non richiede un valore dopo il flag: scrivi solo --stdin, non --stdin True.
-
-    parser.add_argument("--baudrate",
-                        type=int,           # converte l'argomento stringa in int
-                        default=115200,     # valore di default se non specificato
-                        help="Baud rate seriale (default: 115200)")
-
-    # parse_args() legge sys.argv (gli argomenti passati al comando),
-    # li valida e restituisce un oggetto con attributi per ogni argomento.
     args = parser.parse_args()
-    # Ora puoi usare: args.port, args.stdin, args.baudrate
 
-    # Scegliamo la sorgente dati in base all'argomento.
-    # Entrambe le funzioni sono generatori con la stessa interfaccia:
-    # producono oggetti Sample uno alla volta. Il for sotto non sa né gli importa
-    # quale delle due sta usando — questo è il principio degli strati separati.
+    # Scegliamo la sorgente in base all'argomento.
+    # Entrambe producono oggetti Sample — il for sotto è identico in entrambi i casi.
     if args.stdin:
         source = read_from_stdin()
     else:
         source = read_from_serial(args.port, args.baudrate)
 
-    # Loop principale: itera sul generatore e stampa ogni campione.
-    # Questo for non terminerà mai da solo (i generatori sono infiniti)
-    # — si ferma solo con CTRL+C (KeyboardInterrupt) o se la sorgente si chiude.
+    # Loop principale: stampa ogni campione formattato.
+    # Il segno + in {:+.3f} forza la stampa del segno anche per i positivi
+    # (es. +0.023 invece di 0.023) — utile per l'accelerometro dove il segno
+    # indica la direzione.
     for sample in source:
-        # f-string con formattazione:
-        # :6.2f → campo largo 6 caratteri, 2 decimali (allinea le colonne)
-        # :.2f  → solo 2 decimali, senza larghezza fissa
         print(
-            f"T={sample.temperature:6.2f}°C  "
-            f"V={sample.vibration:.2f}  "
-            f"L={sample.load:5.1f}%"
+            f"t={sample.timestamp:7d}ms  "
+            f"T={sample.temperature:5.2f}°C  "
+            f"X={sample.acc_x:+.3f}g  "
+            f"Y={sample.acc_y:+.3f}g  "
+            f"Z={sample.acc_z:+.3f}g"
         )
 
 
-# Entry point — vedi commento dettagliato in simulator.py
+# Entry point — il programma parte da qui solo se eseguito direttamente.
+# Se importato da dashboard.py, main() non viene chiamata automaticamente.
 if __name__ == "__main__":
     main()
