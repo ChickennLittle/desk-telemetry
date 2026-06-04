@@ -1,138 +1,144 @@
 # ==============================================================================
 # simulator.py
-# Scopo: generare dati finti che imitano quelli che manderebbe la board.
-# Così possiamo sviluppare e testare il resto del sistema senza hardware.
+# Scopo: simulare l'output seriale della board (M5Stack CoreS3).
+# Genera dati CSV identici al firmware reale — tutti e 14 i campi.
+#
+# Formato output:
+#   timestamp,temp,acc_x,acc_y,acc_z,gyr_x,gyr_y,gyr_z,mag_x,mag_y,mag_z,mic,bat_v,bat_pct
+#
+# Uso:
+#   python simulator.py                              (stampa su stdout)
+#   python -u simulator.py | python -u reader.py --stdin
+#   python -u simulator.py | python -u dashboard.py --stdin
 # ==============================================================================
 
-
-# --- IMPORT -------------------------------------------------------------------
-# In Python, "import" carica moduli: librerie di funzioni già pronte.
-# Non devi scrivere tutto da zero, usi quello che esiste.
-
-import time       # Modulo standard: funzioni legate al tempo (sleep, ecc.)
-import math       # Modulo standard: funzioni matematiche (sin, cos, sqrt, ecc.)
-import random     # Modulo standard: generazione di numeri casuali
-import sys        # Modulo standard: interazione col sistema operativo
-                  # (argv, stdin, stdout, stderr, exit...)
-
-# Nota: questi quattro moduli sono "standard library" — vengono con Python,
-# non devi installarli. Esistono anche moduli esterni (es. pyserial, numpy)
-# che invece si installano con: pip install <nome_modulo>
+import time
+import math
+import random
+import sys
 
 
-# --- FUNZIONI -----------------------------------------------------------------
-# In Python le funzioni si definiscono con "def nome(parametri):"
-# Il corpo della funzione è INDENTATO (4 spazi). L'indentazione NON è
-# solo stile: è sintassi. Se sbagli l'indentazione, il codice non funziona.
-# Questo è diverso dal C++ dove si usano le parentesi graffe { }.
-
-def generate_data(t: float) -> tuple[float, float, float]:
-    # ↑ Questa è la "type annotation" (firma della funzione):
-    #   - t: float   → il parametro t è un numero decimale
-    #   - -> tuple[float, float, float]  → la funzione restituisce
-    #     una tupla di 3 float (simile a una struct in C++)
-    # Le type annotation in Python sono OPZIONALI — il codice funziona
-    # anche senza, ma le aggiungiamo perché rendono il codice più leggibile
-    # e gli editor come VS Code possono aiutarti meglio.
-
+def generate_data(t: float) -> tuple:
     """
-    Genera un campione di dati simulati al tempo t.
-    Questa è una "docstring": una stringa di documentazione della funzione.
-    Appare quando chiami help(generate_data) nel terminale Python.
+    Genera un campione simulato al tempo t.
+    Ogni sensore ha un comportamento realistico:
+      - Temperatura: valore stabile con piccolo rumore (chip si scalda lentamente)
+      - Accelerometro: board ferma, gravità su Z con piccole vibrazioni
+      - Giroscopio: vicino a zero con piccolo rumore (nessuna rotazione)
+      - Magnetometro: campo costante con variazioni lente (come ambiente reale)
+      - Microfono: rumore ambientale casuale con picchi occasionali
+      - Batteria: stabile al 99% come se fosse collegata a USB
+
+    Args:
+        t: variabile temporale — incrementata ad ogni campione
+
+    Returns:
+        tupla con tutti i valori nel formato del firmware
     """
 
-    # Stessa formula del firmware C++ — così i dati simulati sono identici
-    # a quelli reali. math.sin() lavora in radianti, come in C++.
-    temperature = 23.0 + math.sin(t) * 2.0
-    #             ↑ valore base (23°C) + oscillazione sinusoidale ±2°C
+    # --- Timestamp ---
+    # millis() in Arduino inizia da 0 all'accensione e incrementa.
+    # Simuliamo lo stesso: convertiamo t (in secondi) in millisecondi.
+    # int() tronca il float all'intero — come millis() che è un intero.
+    timestamp = int(t * 1000)
 
-    vibration = random.randint(0, 100) / 100.0
-    #           ↑ random.randint(a, b) genera un intero casuale tra a e b inclusi
-    #             dividiamo per 100.0 per ottenere un float tra 0.0 e 1.0
-    #             Nota: in Python "/" è sempre divisione float, "//" è intera
+    # --- Temperatura IMU ---
+    # Il chip si scalda leggermente nel tempo, poi si stabilizza.
+    # math.tanh() è una funzione che sale rapidamente e poi si appiattisce
+    # — perfetta per simulare il riscaldamento del chip.
+    # Partiamo da 35°C e saliamo a circa 41°C, con piccolo rumore casuale.
+    temp = 35.0 + 6.0 * math.tanh(t / 60.0) + random.gauss(0, 0.05)
+    # ↑ random.gauss(media, deviazione_standard): genera un numero casuale
+    #   con distribuzione gaussiana (campana) — più realistico di random puro
 
-    load = 50.0 + math.sin(t * 0.5) * 20.0
-    #     ↑ oscillazione più lenta (frequenza dimezzata rispetto a temperature)
+    # --- Accelerometro ---
+    # Board ferma sul tavolo: X≈0, Y≈0, Z≈1.0 (gravità)
+    # Aggiungiamo piccole vibrazioni casuali (rumore sensore)
+    acc_x = random.gauss(0.0,  0.003)
+    acc_y = random.gauss(-0.01, 0.003)
+    acc_z = random.gauss(1.010, 0.003)
 
-    # "return" restituisce i valori al chiamante.
-    # Restituire più valori separati da virgola crea automaticamente una TUPLA.
-    # Una tupla è una sequenza immutabile: (22.4, 0.53, 67.2)
-    # Immutabile = non puoi modificarla dopo averla creata (a differenza delle liste).
-    return temperature, vibration, load
+    # --- Giroscopio ---
+    # Board ferma: tutti vicini a zero, con piccolo drift tipico del sensore
+    gyr_x = random.gauss(0.0, 0.2)
+    gyr_y = random.gauss(0.0, 0.2)
+    gyr_z = random.gauss(-0.3, 0.2)
 
+    # --- Magnetometro ---
+    # Campo magnetico con variazioni lente (interferenze ambientali)
+    # Valori tipici osservati dalla board reale
+    mag_x = -175.0 + math.sin(t * 0.1) * 20.0 + random.gauss(0, 5)
+    mag_y =  330.0 + math.cos(t * 0.08) * 25.0 + random.gauss(0, 5)
+    mag_z =   65.0 + math.sin(t * 0.05) * 15.0 + random.gauss(0, 3)
 
-# --- FUNZIONE PRINCIPALE ------------------------------------------------------
+    # --- Microfono ---
+    # Rumore ambientale basso con picchi occasionali (voci, rumori)
+    # random.random() genera un float uniforme tra 0.0 e 1.0
+    # Se il valore casuale è > 0.97 (3% di probabilità) simuliamo un picco
+    if random.random() > 0.97:
+        mic = random.gauss(30.0, 10.0)  # picco audio
+    else:
+        mic = random.gauss(0.3, 0.15)   # silenzio con piccolo rumore
+
+    # max(0, ...) garantisce che il livello non scenda sotto 0
+    mic = max(0, mic)
+
+    # --- Batteria ---
+    # Collegata a USB: tensione stabile, percentuale 99%
+    bat_v   = 4.154 + random.gauss(0, 0.001)
+    bat_pct = 99
+
+    return (timestamp, temp,
+            acc_x, acc_y, acc_z,
+            gyr_x, gyr_y, gyr_z,
+            mag_x, mag_y, mag_z,
+            mic, bat_v, bat_pct)
+
 
 def main():
-    # Variabile locale: esiste solo dentro questa funzione.
-    # In Python non devi dichiarare il tipo — Python lo capisce da solo
-    # (questo si chiama tipizzazione dinamica).
     t = 0.0
-    interval = 0.2  # secondi tra un campione e l'altro (= delay(200) del firmware)
+    interval = 0.1  # 100ms tra un campione e l'altro (come il firmware)
 
-    # sys.stderr è lo "standard error": un canale di output separato da stdout.
-    # stdout  → i dati veri (temperature, vibrazione, carico)
-    # stderr  → messaggi informativi, errori, log
-    # Tenerli separati è importante: quando fai il pipe ( | ) tra due script,
-    # solo stdout viene passato al secondo script. I messaggi su stderr
-    # appaiono nel terminale senza interferire coi dati.
     print("# Desk Telemetry Simulator avviato", file=sys.stderr)
-    print("# Formato: temperature,vibration,load", file=sys.stderr)
+    print("# Formato: timestamp,temp,acc_x,acc_y,acc_z,gyr_x,gyr_y,gyr_z,"
+          "mag_x,mag_y,mag_z,mic,bat_v,bat_pct", file=sys.stderr)
     print("# CTRL+C per fermare", file=sys.stderr)
 
-    # try / except: gestione delle eccezioni (errori a runtime).
-    # Equivalente concettuale del try/catch in C++.
-    # KeyboardInterrupt è l'eccezione lanciata da Python quando premi CTRL+C.
     try:
-        # "while True" è un loop infinito — va avanti finché non lo interrompi.
-        # In C++ scriveresti: while(true) { ... }
         while True:
-            # Chiamiamo generate_data e "spacchettamo" la tupla restituita
-            # direttamente in tre variabili. Questo si chiama "unpacking".
-            # Equivale a:
-            #   result = generate_data(t)
-            #   temp = result[0]
-            #   vib  = result[1]
-            #   load = result[2]
-            temp, vib, load = generate_data(t)
+            # Spacchettamento della tupla in variabili separate
+            (timestamp, temp,
+             acc_x, acc_y, acc_z,
+             gyr_x, gyr_y, gyr_z,
+             mag_x, mag_y, mag_z,
+             mic, bat_v, bat_pct) = generate_data(t)
 
-            # f-string: modo moderno per formattare stringhe in Python.
-            # Sintassi: f"testo {variabile:.2f} altro testo"
-            # :.2f  → formato float con 2 decimali (come printf("%.2f") in C)
-            line = f"{temp:.2f},{vib:.2f},{load:.2f}"
+            # f-string con formattazione per ogni campo
+            # Il formato coincide esattamente con l'output del firmware
+            line = (
+                f"{timestamp},"
+                f"{temp:.2f},"
+                f"{acc_x:.3f},{acc_y:.3f},{acc_z:.3f},"
+                f"{gyr_x:.2f},{gyr_y:.2f},{gyr_z:.2f},"
+                f"{mag_x:.2f},{mag_y:.2f},{mag_z:.2f},"
+                f"{mic:.1f},"
+                f"{bat_v:.3f},"
+                f"{bat_pct}"
+            )
 
-            # print() stampa su stdout di default.
-            # flush=True forza Python a scrivere immediatamente senza bufferizzare.
-            # Senza flush=True, Python potrebbe accumulare più righe in memoria
-            # prima di scriverle — il reader non riceverebbe nulla per secondi.
             try:
                 print(line, flush=True)
             except OSError:
-                # Questo blocco viene eseguito se il reader chiude la pipe
-                # (es. se il processo che legge i dati termina).
-                print("\n# Pipe chiusa dal reader. Simulatore fermato.", file=sys.stderr)
-                sys.exit(0)  # termina il programma senza errori
-            t += 0.1        # avanziamo il tempo (come t += 0.1 nel firmware)
-            time.sleep(interval)  # aspettiamo 200ms prima del prossimo campione
+                # Il pipe si è chiuso (es. dashboard chiuso) — usciamo puliti
+                sys.exit(0)
+
+            t += 0.1
+            time.sleep(interval)
 
     except KeyboardInterrupt:
-        # Questo blocco viene eseguito SOLO quando premi CTRL+C.
-        # \n stampa una riga vuota (il cursore è sulla stessa riga del ^C).
         print("\n# Simulatore fermato.", file=sys.stderr)
-        sys.exit(0)  # termina il programma. 0 = uscita senza errori (come in C)
+        sys.exit(0)
 
 
-# --- ENTRY POINT --------------------------------------------------------------
-# Questo è un idioma fondamentale di Python che troverai in ogni script.
-#
-# Quando Python esegue un file imposta la variabile speciale __name__.
-#   - Se lanci direttamente "python simulator.py"  → __name__ == "__main__"
-#   - Se un altro script fa "import simulator"     → __name__ == "simulator"
-#
-# Il controllo qui sotto fa sì che main() venga chiamata solo nel primo caso.
-# Questo permette ad altri script di importare generate_data() da questo file
-# senza avviare il loop infinito del simulatore.
-#
-# È buona pratica metterlo sempre alla fine di ogni script Python.
 if __name__ == "__main__":
     main()
